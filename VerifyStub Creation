@@ -1,0 +1,137 @@
+$Symboliclinks = get-childitem -path "\\10.115.10.13\g$\CorpData\" -Recurse -ErrorAction SilentlyContinue| Where {$_.linktype -eq "SymbolicLink"} | select Name,@{Name=’OnPremiseDirectory’;Expression={[string]::join(“;”, ($_.Fullname))}},@{Name=’SharepointDirectory’;Expression={[string]($_.Fullname.replace("\\10.115.10.13\g$\CorpData\","I:\"))}}, @{Name=’OnPremiseArchiveTarget’;Expression={[string]::join(“;”, ($_.Target))}}, @{Name=’AFSArchiveTarget’;Expression={[string]($_.Target.replace("UNC\fiftyfive5.local\data\Archives\G\Corpdata\","\\ff5saafsprdae.file.core.windows.net\archivedata\Archived-Data\"))}} | export-csv C:\temp\SymbolicLinksAll.csv -NoTypeInformation
+
+$Symboliclinks = get-childitem -path "\\10.115.10.13\g$\CorpData\Admin\" -Recurse -ErrorAction SilentlyContinue| Where {$_.linktype -eq "SymbolicLink"} | select Name,@{Name=’OnPremiseDirectory’;Expression={[string]::join(“;”, ($_.Fullname))}},@{Name=’SharepointDirectory’;Expression={[string]($_.Fullname.replace("\\10.115.10.13\g$\CorpData\","I:\"))}}, @{Name=’OnPremiseArchiveTarget’;Expression={[string]::join(“;”, ($_.Target))}}, @{Name=’AFSArchiveTarget’;Expression={[string]($_.Target.replace("UNC\fiftyfive5.local\data\Archives\G\Corpdata\","\\ff5saafsprdae.file.core.windows.net\archivedata\Archived-Data\"))}}, @{Name=’OnPremiseArchiveTargetLocalDisk’;Expression={[string]($_.Target.replace("UNC\fiftyfive5.local\data\Archives\G\Corpdata\","R:\Archived-Data\G\CorpData\"))}} | export-csv C:\temp\SymbolicLinksAdmin.csv -NoTypeInformation
+
+
+$SymboliclinksTest = get-childitem -path "\\10.115.10.13\g$\CorpData\Admin" -Recurse -ErrorAction SilentlyContinue| Where {$_.linktype -eq "SymbolicLink"} | select Name,@{Name=’OnPremiseDirectory’;Expression={[string]::join(“;”, ($_.Fullname))}}, @{Name=’OnPremiseArchiveTarget’;Expression={[string]::join(“;”, ($_.Target))}}
+
+
+       
+        
+
+foreach ($linktest in $Symboliclinkstest){
+$Testarray = New-Object -TypeName PSObject -Property $TestarrayProps
+        $TestarrayProps = [Ordered]@{} 
+        $TestarrayProps.Add(’name’,$linktest.name) 
+
+        $TestarrayProps.Add(’OnPremiseDirectory’,$linktest.Fullname) 
+
+        $TestarrayProps.Add(’OnPremiseArchiveTarget’,$null) 
+
+        $TestarrayProps.Add(’SharepointDirectory’,$null) 
+
+        $TestarrayProps.Add(’AFSArchiveTarget’,$null) 
+
+        $TestarrayProps.Add(’OnPremiseArchiveTargetLocalDisk’,$null)
+       
+        $Testarray = New-Object -TypeName PSObject -Property $TestarrayProps
+
+}
+
+$testarray = export-csv c:\temp\test.csv -NoTypeInformation
+
+$Symboliclinks = get-childitem -path "\\10.115.10.13\g$\CorpData" -Recurse -ErrorAction SilentlyContinue| Where {$_.linktype -eq "SymbolicLink"} | select Name,@{Name=’OnPremiseDirectory’;Expression={[string]::join(“;”, ($_.Fullname))}},@{Name=’SharepointDirectory’;Expression={[string]($_.Fullname.replace("\\10.115.10.13\g$\CorpData\","I:\"))}}, @{Name=’OnPremiseArchiveTarget’;Expression={[string]::join(“;”, ($_.Target))}}, @{Name=’AFSArchiveTarget’;Expression={[string]($_.Target.replace("UNC\fiftyfive5.local\data\Archives\G\Corpdata\","\\ff5saafsprdae.file.core.windows.net\archivedata\Archived-Data\"))}}, @{Name=’OnPremiseArchiveTargetLocalDisk’;Expression={[string]($_.Target.replace("UNC\fiftyfive5.local\data\Archives\G\Corpdata\","R:\Archived-Data\G\CorpData\"))}} | export-csv C:\temp\SymbolicLinksAll.csv -NoTypeInformation
+
+
+$array = @()
+$symboliclinks = import-csv C:\temp\SymbolicLinksall.csv
+        foreach ($link in $Symboliclinks){
+    #Write-Log -Value "Getting variables for $link.name"
+    #Make sure that the Link still exists On Premises
+
+    #$aRRAY.NAME += $LINK.NAME
+    $OnPremLink_check = get-item $link.onpremiseDirectory -ErrorAction SilentlyContinue
+
+    #Get variable to make sure it doesnt exists in sharepoint
+    $Sharepoint_check = get-item $link.SharepointDirectory -ErrorAction SilentlyContinue
+
+    $SharepointShortcut = $link.SharepointDirectory + ".lnk"
+    $SharepointShortcut_check = get-item $SharepointShortcut -ErrorAction SilentlyContinue
+
+    #Create variable of Sharepoint parent Folder Path
+    $sharepointParentFolder_Variable = $link.SharepointDirectory.trimend($link.name)
+
+    #Check Sharepoint parent Folder Path
+    $SharepointParentFolder_check = get-item $sharepointParentFolder_Variable -ErrorAction SilentlyContinue
+
+    #Check that Archived Folder is present in AFS, AKA Successfuly Rehydration
+    $AFSArchiveTarget_check = get-item $link.AFSArchiveTarget -ErrorAction SilentlyContinue
+
+    #Check that Archived Folder Local Disk as UNC path is unuseable
+    $OnPremiseArchiveLocalDisk_check = get-item  $Link.OnPremiseArchiveTargetLocalDisk -ErrorAction SilentlyContinue
+   
+
+    if ($OnPremLink_check -ne $null){
+        $OnPremLink_check = "Pass"
+        #$aRRAY.NAME =+ $LINK.NAME
+        #Write-Log -Value "PreVerification Pass: On-Premise Symbolic Link Exists"
+    }
+    else{
+        $OnPremLink_check = "Fail"
+        #Write-Log -Value "PreVerification Fail: On-Premise Symbolic Does Not Exist"
+    }
+    if ($Sharepoint_check -eq $null){
+        $Sharepoint_check = "Pass"
+       # Write-Log -Value "PreVerification Pass: Destination Sharepoint Folder does not exist"
+    }
+    else{
+        $Sharepoint_check = "Fail"
+       # Write-Log -Value "PreVerification Fail: Destination Sharepoint Folder does  exist"
+    }
+    if ($SharepointShortcut_check -eq $null){
+        $SharepointShortcut_check = "Pass"
+        #Write-Log -Value "PreVerification Pass: Destination Sharepoint shortcut does not exist"
+    }
+    else{
+        $SharepointShortcut_check = "Fail"
+        #Write-Log -Value "PreVerification Fail: Destination Sharepoint Shortcut does  exist"
+    }
+    if ($SharepointParentFolder_check -ne $null){
+        $SharepointParentFolder_check = "Pass"
+        #Write-Log -Value "PreVerification Pass: Destination Sharepoint Parent Folder exists"
+    }
+    else{
+        $SharepointParentFolder_check = "Fail"
+        #Write-Log -Value "PreVerification Fail: Destination Sharepoint Parent Folder does not exist"
+    }
+    if ($AFSArchiveTarget_check -ne $null){
+        $AFSArchiveTarget_check = "Pass"
+        #Write-Log -Value "PreVerification Pass: Destination AFS Archive Target Folder exists"
+    }
+    else{
+        $AFSArchiveTarget_check = "Fail"
+        #Write-Log -Value "PreVerification Fail: Destination AFS Archive Target Folderr does not exist"
+    }
+        if ($OnPremiseArchiveLocalDisk_check -ne $null){
+        $OnPremiseArchiveLocalDisk_check = "Pass"
+        #Write-Log -Value "PreVerification Pass: Destination AFS Archive Target Folder exists"
+    }
+    else{
+        $OnPremiseArchiveLocalDisk_check = "Fail"
+        #Write-Log -Value "PreVerification Fail: Destination AFS Archive Target Folderr does not exist"
+    }
+
+
+
+
+    $array += New-Object -TypeName PSObject -Property @{
+    
+        OnPremSymbolicLinkName = $link.name
+        OnPremSymbolicLinkPath            =  $link.onpremiseDirectory
+        OnPremSymbolicLinkCheck          = $OnPremLink_check
+        OnPremSymbolicLinkTargetPath            =  $link.OnPremiseArchiveTarget
+        OnPremArchiveLocalDisk = $Link.OnPremiseArchiveTargetLocalDisk
+        SharepointPath = $link.SharepointDirectory
+        Sharepoint_check            = $Sharepoint_check
+        SharepointShortcutPath = $SharepointShortcut
+        SharepointShortcut_check        = $SharepointShortcut_check
+        SharepointParentFolder_Path = $sharepointParentFolder_Variable
+        SharepointParentFolder_check        = $SharepointParentFolder_check
+        AFSArchiveTarget_Path = $link.AFSArchiveTarget
+        AFSArchiveTarget_check      = $AFSArchiveTarget_check
+
+
+}
+}
+
+$array | export-csv C:\temp\SymbolicLinksvalidation.csv -NoTypeInformation
