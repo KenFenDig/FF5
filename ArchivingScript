@@ -1,0 +1,691 @@
+<#
+.SYNOPSIS
+  Archives Folders from I:\Clients\ Sub Directories to AFS Z:\Archived-Data\Clients for FF5 based on CSV File Input
+
+.
+.INPUTS
+  Prompts for CSV File Import for folders to be archived. CSV File must have the follow headers:
+  Client,Project
+
+  Client: is the name of the client folder located under I:\Clients EG: I:\Clients\Qantas
+  Project: Is the first level folder underneath the Client Folder I:\Clients\Qantas\Project Sunrise.
+.OUTPUTS
+Saves Summary Report to C:\FF5ArchvingScriptLogs\Clients\ReportSummary" which summaries all the folders that were archived or attempted from the input CSV
+
+Saves log files to C:\FF5ArchvingScriptLogs\Clients\<CLIENTNAME>\<Project Folder> 3 log files for each indiciual entry from the CSV into each specific Folder Directory.
+    <ClientName_Folder>.log - contains this scripts tasks and any errors
+    <ClientName_Folder>_FolderPermissions.csv" - contains the sharepoint export of the folder permissions before migrating data
+    <ClientName_a>_Robocopy.log" - contains the robocopy Log for the transfer of files.
+
+  Version:        1.0
+  Author:         Kean Fennell
+  Creation Date:  08/04/2022
+  Purpose/Change: Initial script development
+
+#>
+#---------------------------------------------------------[Initialisations]--------------------------------------------------------
+
+#Set Error Action to Silently Continue
+$ErrorActionPreference = "SilentlyContinue"
+#----------------------------------------------------------[Declarations]----------------------------------------------------------
+
+#Sharepoint Site Connections Strings
+$SiteURL = "https://fiftyfivefive.sharepoint.com/sites/Internal"
+$Resultset = @()
+
+#Global Variable passed between functions
+$global:RobocopyCheck = $null
+$global:AFSARCHIVECHECK = $null
+$global:SharepointShortcutCHECK = $null
+
+$global:PermissionsVariable = $null
+
+#-----------------------------------------------------------[Functions]------------------------------------------------------------
+
+#Log Function
+Function Write-Log {
+
+    Param (
+        [parameter(Mandatory = $True)]
+        [String]$Value,
+        [parameter(Mandatory = $True)]
+        [String]$logpath
+    )
+
+    $time = Get-Date -Format F
+    $Log = $Value + " ---> " + $time
+
+    Add-Content -Path $logpath -Value $log  -Force
+}
+
+#Function to prompt for GUI CSV File Input
+Function Get-FileName($InitialDirectory) {
+    [System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms") | Out-Null
+
+    $OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $OpenFileDialog.initialDirectory = $initialDirectory
+    $OpenFileDialog.filter = "CSV (*.csv) | *.csv"
+    $OpenFileDialog.ShowDialog() | Out-Null
+    $OpenFileDialog.FileName
+}
+
+
+#Function to get the folder permissions from Sharepoint directory
+Function Get-PnPFolderPermission([Microsoft.SharePoint.Client.Folder]$Folder) {
+    Try {
+        #Get permissions assigned to the Folder
+        Get-PnPProperty -ClientObject $Folder.ListItemAllFields -Property HasUniqueRoleAssignments, RoleAssignments
+
+        #Check if Folder has unique permissions
+        $HasUniquePermissions = $Folder.ListItemAllFields.HasUniqueRoleAssignments
+
+        #Loop through each permission assigned and extract details
+        $PermissionCollection = @()
+        Foreach ($RoleAssignment in $Folder.ListItemAllFields.RoleAssignments) {
+            #Get the Permission Levels assigned and Member
+            Get-PnPProperty -ClientObject $RoleAssignment -Property RoleDefinitionBindings, Member
+
+            #Leave the Hidden Permissions
+            If ($RoleAssignment.Member.IsHiddenInUI -eq $False) {
+                #Get the Principal Type: User, SP Group, AD Group
+                $PermissionType = $RoleAssignment.Member.PrincipalType
+                $PermissionLevels = $RoleAssignment.RoleDefinitionBindings | Select -ExpandProperty Name
+
+                #Remove Limited Access
+                $PermissionLevels = ($PermissionLevels | Where { $_ -ne "Limited Access" }) -join ","
+                If ($PermissionLevels.Length -eq 0) { Continue }
+
+                #Get SharePoint group members
+                If ($PermissionType -eq "SharePointGroup") {
+                    #Get Group Members
+                    $GroupName = $RoleAssignment.Member.LoginName
+                    $GroupMembers = Get-PnPGroupMember -Identity $GroupName
+
+                    #Leave Empty Groups
+                    If ($GroupMembers.count -eq 0) { Continue }
+                    If ($GroupName -notlike "*System Account*" -and $GroupName -notlike "*SharingLinks*" -and $GroupName -notlike "*tenant*" -and $GroupName -notlike `
+                            "Excel Services Viewers" -and $GroupName -notlike "Restricted Readers" -and $GroupName -notlike "Records Center Web Service Submitters for records") {
+                        ForEach ($User in $GroupMembers) {
+                            #Add the Data to Folder
+                            $Permissions = New-Object PSObject
+                            $Permissions | Add-Member NoteProperty FolderName($Folder.Name)
+                            $Permissions | Add-Member NoteProperty FolderURL($Folder.ServerRelativeUrl)
+                            $Permissions | Add-Member NoteProperty User($User.Title)
+                            $Permissions | Add-Member NoteProperty Type($PermissionType)
+                            $Permissions | Add-Member NoteProperty Permissions($PermissionLevels)
+                            $Permissions | Add-Member NoteProperty GrantedThrough("SharePoint Group: $($RoleAssignment.Member.LoginName)")
+                            $PermissionCollection += $Permissions
+                        }
+                    }
+                }
+                Else {
+
+                    #Add the Data to Folder
+                    $Permissions = New-Object PSObject
+                    $Permissions | Add-Member NoteProperty FolderName($Folder.Name)
+                    $Permissions | Add-Member NoteProperty FolderURL($Folder.ServerRelativeUrl)
+                    $Permissions | Add-Member NoteProperty User($RoleAssignment.Member.Title)
+                    $Permissions | Add-Member NoteProperty Type($PermissionType)
+                    $Permissions | Add-Member NoteProperty Permissions($PermissionLevels)
+                    $Permissions | Add-Member NoteProperty GrantedThrough("Direct Permissions")
+                    $PermissionCollection += $Permissions
+                }
+            }
+        }
+        #return $PermissionCollection
+        #Export Permissions to CSV File
+        $PermissionsVariable = $PermissionCollection
+        $PermissionsVariable
+        $PermissionCollection | Export-CSV $PermissionsReport -NoTypeInformation -Append
+        Write-host -f Green "`n*** Permissions of Folder '$($Folder.Name)' at '$($Folder.ServerRelativeUrl)' Exported Successfully!***"
+        # $newCollection = return $PermissionCollection
+    }
+    Catch {
+        write-host -f Red "Error Generating Folder Permission Report!" $_.Exception.Message
+    }
+}
+#Function to check if Folders pre-exist
+Function CheckFolderPaths {
+    Param (
+        [parameter(Mandatory = $True)]
+        [String]$RoboDestination,
+        [parameter(Mandatory = $True)]
+        [String]$ParentFolder,
+        [parameter(Mandatory = $True)]
+        [String]$ShortcutDestination,
+        [parameter(Mandatory = $True)]
+        [String]$SharepointSourceLocation
+    )
+
+    Try {
+        Write-Log  -Value "Checking Folder Locations for Any possible conflicts" -logpath $LogFileName
+        # Check if Z: Drive Project Folder location exists. If it Does, sets to Fail. Need to manually fix.
+        if (Test-Path -Path $RoboDestination) {
+            Write-Log  -Value "Folder already Exist, Check Failed so stopping Script" -logpath $LogFileName
+            $script:AFSARCHIVECHECK = "Fail"
+            #Break
+        }
+        Else {
+            Write-Log  -Value "Folder Does not already Exists, check Pass" -logpath $LogFileName
+            $script:AFSARCHIVECHECK = "Pass"
+        }
+        # Check if Z: Drive Client "PArent" Folder location exists. If it Does, sets to Fail. Need to manually fix.
+        if (Test-Path -Path $ParentFolder) {
+            Write-Log  -Value "Parent folder does Exists, check Pass" -logpath $LogFileName
+            $script:ArchiveParentFolder = "Pass"
+        }
+        Else {
+            Write-Log  -Value "Parent Folder does not already Exist, Check Failed so stopping Script" -logpath $LogFileName
+            $script:ArchiveParentFolder = "Fail"
+        }
+        # Check if there is already a shortcut created in I: Drive.
+        if (Test-Path -Path $ShortcutDestination) {
+            Write-Log  -Value "ArchiveShortcut already Exist, Check Failed so stopping Script" -logpath $LogFileName
+            $script:SharepointShortcutCheck = "Fail"
+        }
+        Else {
+            Write-Log  -Value "Shortcut does not already Exists, check Pass" -logpath $LogFileName
+            $script:SharepointShortcutCheck = "Pass"
+        }
+        #Confirm if I Drive Location exists
+        if (Test-Path -Path $SharepointsourceLocation) {
+            Write-Log  -Value "Source Folder does exist" -logpath $LogFileName
+            $script:SharepointSourceCheck = "Pass"
+
+        }
+        Else {
+            Write-Log  -Value "SharepointSource does not actually exist." -logpath $LogFileName
+            $script:SharepointSourceCheck = "Fail"
+        }
+    }
+    Catch {
+        Write-Warning $_
+    }
+}
+##Function to transfer data from Sharepoint to AFS using Robocopy
+function Invoke-Robocopy {
+    param
+    (
+        [String]
+        [Parameter(Mandatory)]
+        $RoboSource,
+
+        [String]
+        [Parameter(Mandatory)]
+        $RoboDestination,
+        [String]
+        [Parameter(Mandatory)]
+        $RoboLog
+
+    )
+
+
+    Try {
+        robocopy $RoboSource *.* $RoboDestination  /E  /W:0 /R:20 /MT24 /LOG+:$RobocopyLog /tee 
+    }
+    Catch {
+        Write-Warning $_
+    }
+
+}
+#Function to confirm total Items in Sharepoint and total items in AFS after robocopy has completed
+function Check-Robocopy {
+    param
+    (
+        [String]
+        [Parameter(Mandatory)]
+        $RoboSource,
+
+        [String]
+        [Parameter(Mandatory)]
+        $RoboDestination
+
+    )
+
+    #"Checking File count in source and destination"
+    $script:CheckSource = ( Get-ChildItem $RoboSource -Recurse | Measure-Object ).Count
+    $script:Checkdestination = ( Get-ChildItem $RoboDestination -Recurse | Measure-Object ).Count
+    #Confirm that file count is identical in source and destination
+    if ($CheckSource -eq $Checkdestination) {
+        Write-Log  -Value "I Drive Contained $CheckSource and Z: drive now contains $Checkdestination"  -logpath $LogFileName
+        $script:RobocopyCheck = "Pass"
+        #Pause
+    }
+    else {
+        Write-Log  -Value "I Drive Contained $CheckSource and Z: drive now contains $Checkdestination, This is a failure. Exiting Script"  -logpath $LogFileName
+        $script:RobocopyCheck = "Fail"
+        break
+    }
+
+}
+#Function (Uses NTFSSecurity Module) to Disable Inheritence on copied folder and remove all accounts with the exception of FIFTYFIVE5\555ArchivedProjectDataReadWrite, NT AUTHORITY\SYSTEM and BUILTIN\Administrators. -
+function RemoveArchivePermissions {
+    param
+    (
+        [String]
+        [Parameter(Mandatory)]
+        $RoboDestination
+
+    )
+
+    Try {
+        Disable-NTFSAccessInheritance -Path $RoboDestination
+        $RemovePermissions = Get-NTFSAccess -Path $RoboDestination
+        foreach ($rPermission in $removepermissions) {
+
+            if (($rPermission.Account.AccountName -ne 'FIFTYFIVE5\555ArchivedProjectDataReadWrite') -and ($rPermission.Account.AccountName -ne 'NT AUTHORITY\SYSTEM') -and ($rPermission.Account.AccountName -ne 'BUILTIN\Administrators') -and ($rPermission.Account.AccountName -ne 'CREATOR OWNER') ) {
+                Remove-NTFSAccess -Path $RoboDestination -Account $rPermission.account.AccountName -AccessRights $rPermission.AccessRights
+                Write-Log  -Value "Removed $rPermission from $RoboDestination"   -logpath $LogFileName
+            }
+        }
+    }
+    Catch {
+        write-host -f Red "Error Removing the permission groups that are not required" $_.Exception.Message
+    }
+
+}
+
+#Function (Uses NTFSSecurity Module) to Apply the permissions exported from Previous Function with Read Only permissions-
+function AddArchivePermissions {
+    param
+    (
+        [String]
+        [Parameter(Mandatory)]
+        $RoboDestination,
+        [array]
+        [Parameter(Mandatory)]
+        $PermissionsParameter
+
+    )
+    Try {
+        $Permissions = $PermissionsParameter
+        foreach ($Permission in $Permissions) {
+            if (($permission.user -ne 'Administrator') -and ($Permission.grantedThrough -eq 'Direct Permissions')) {
+                add-NTFSAccess -Path $RoboDestination -Account $permission.user -AccessRights ReadAndExecute
+                Write-Log  -Value "Added $mPermission.user.string with Read Only Access"    -logpath $LogFileName
+            }
+        }
+    }
+    Catch {
+        write-host -f Red "Error Generating Folder Permission Report!" $_.Exception.Message
+        Break
+    }
+
+}
+#Checks that the permissions have successfully applied to z:
+function CheckArchivePermissions {
+    param
+    (
+        [String]
+        [Parameter(Mandatory)]
+        $RoboDestination,
+        [array]
+        [Parameter(Mandatory)]
+        $PermissionsParameter
+
+    )
+    Try {
+        $Permissions = $PermissionsParameter
+        foreach ($Permission in $Permissions) {
+            if (($permission.user -ne 'Administrator') -and ($Permission.grantedThrough -eq 'Direct Permissions')) {
+                $permCheck = get-NTFSAccess -Path $RoboDestination -Account $permission.user
+                if (!($permcheck)) {
+                    Write-Log  -Value "Error: Migrated permission missing. Investigate $permission.user"  -logpath $LogFileName
+                    Break
+                }
+                Else {
+                    Write-Log  -Value "Permissions migrated successfully: $permission.user"  -logpath $LogFileName
+                }
+            }
+        }
+
+    }
+    Catch {
+        write-host -f Red "Error Generating Folder Permission Report!" $_.Exception.Message
+        Break
+    }
+
+}
+
+#Function to create Shortcut in Sharepoint with specific file Icon
+function CreateShortcut {
+    param
+    (
+        [String]
+        [Parameter(Mandatory)]
+        $RoboDestination,
+        [String]
+        [Parameter(Mandatory)]
+        $ShortcutTarget
+
+    )
+    Try {
+        $WScriptShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WScriptShell.CreateShortcut($ShortcutTarget)
+        $Shortcut.TargetPath = $ArchiveDestination
+        $shortcut.IconLocation = "C:\Windows\system32\SHELL32.dll,45"
+        $Shortcut.Save()
+        Write-Log  -Value "Created Shortcut in Sharepoint" -logpath $LogFileName
+    }
+    Catch {
+        write-host -f Red "Error Creating Shortcut" $_.Exception.Message
+        break
+    }
+
+}
+#-----------------------------------------------------------[FunctionsEnd]------------------------------------------------------------
+
+#-----------------------------------------------------------[Script Start]------------------------------------------------------------
+#load CSV File by GUI input
+$filePath = Get-FileName
+$ArchiveFolders = import-csv $filePath
+$ReportSummaryDirectory = "C:\FF5ArchvingScriptLogs\Clients\ReportSummary"
+$date = Get-Date -Format dd-M-yy-HHmm
+$ReportSummaryFile = $ReportSummaryDirectory + "ArchiveSummary" + $date + ".csv"
+Try {
+    if (!(Get-Module  | where { $_.Name -eq "PNP.Powershell" })) {
+        Connect-PnPOnline -URL $SiteURL -useweblogin
+    }
+}
+Catch {
+    write-host -f Red "Error connecting to PNP Powershell Module. Ensure that you have relevant Access, IE Global Admin\SharepointAdmin" $_.Exception.Message
+    Break
+}
+
+Try {
+    #write-host "Check if I:Drive is mapped"
+    $IDrive = net use i:
+    if ($IDrive) {
+    }
+    else {
+        write-host -f Red "I Drive is Not Mapped. Fix this issue. Exiting Script"
+        break
+    }
+}
+Catch {
+    write-host -f Red "Error connecting to PNP Powershell Module. Ensure that you have relevant Access, IE Global Admin\SharepointAdmin" $_.Exception.Message
+    Break
+}
+
+
+#Loop through each Entry in CSV
+
+foreach ($AFolder in $ArchiveFolders) {
+
+    write-host -f White "########################################################"
+    write-host -f White "Starting Archive Proccess for $($AFolder.client)\$($AFolder.Project)"
+    #Sets all script variables like folder path locations etc
+    $Client = $AFolder.Client
+    $ProjecttoArchive = $AFolder.Project
+    $ArchiveFolderPath = $Client + "/" + $ProjecttoArchive
+
+    #Sets SharePoint Path and Reformatting dashes
+    $sharepointSourceBase = "I:\Clients\" + $ArchiveFolderPath
+    $sharepointSource = $sharepointSourceBase.replace("/", "\")
+
+    #Sets log file directory and names for script
+    $LogFileBaseDirectory = "C:\FF5ArchvingScriptLogs\Clients\"
+    $LogFileArchiveDirectory = $LogFileBaseDirectory + $ArchiveFolderPath.replace("/", "\")
+    $LogFileClientDirectory = ($LogFileArchiveDirectory.Split("\") | Select -Index 0, 1, 2, 3) -join "\"
+    $LogFileName = $LogFileArchiveDirectory + "\Scriptlog.log"
+    $PermissionsReport = $LogFileArchiveDirectory + "\FolderPermissions.csv"
+    $RobocopyLog = $LogFileArchiveDirectory + "\Robocopy.log"
+
+    #Sets Sharepoint Folders
+    $FolderSiteRelativeURL = "/sites/Internal/intdata/Clients/" + $ArchiveFolderPath
+    $SharepointParentFolder = "/intdata/Clients/" + $Client
+
+    #AFS Connection Strings
+    $ArchiveDestination = "\\ff5saafsprdae.file.core.windows.net\archivedata\archived-data\Clients\" + $ArchiveFolderPath.replace("/", "\")
+    $ArchiveDesitnationParentFolder = Split-path $ArchiveDestination
+    $SharepointShortcut = $sharepointSource + ".lnk"
+
+    #Clears report results back to Null
+    $ConfirmFolderPathResult = $null
+    $ConfirmPermissionsExport = $null
+    $confirmRoboCopy = $null
+    $ConfirmCheckRobocopy = $null
+    $confirmRemovePermissions = $null
+    $confirmAddArchivePermissions = $null
+    $confirmCheckArchivePermissions = $null
+    $confirmCreateShortcut = $null
+    $confirmEntireScriptSuccessful = $null
+
+
+    ##Creates Log File Directories to Save all Client specific logs to C:\FF5ArchvingScriptLogs\Clients\<CLIENTNAME>
+    Try {
+        #write-host "CreateLogFileDirectory"
+        if (!(Test-Path $LogFileArchiveDirectory)) {
+            $createLogFileClientDirectory = New-Item -Path $LogFileArchiveDirectory -ItemType Directory -Force -Confirm:$false
+        }
+        If (Test-Path $PermissionsReport) {
+            Remove-Item $PermissionsReport
+        }
+
+    }
+    Catch {
+        write-host -f Red "Error creating logging directories!" $_.Exception.Message
+        Break
+    }
+
+    #Runs the Function to Check that AFS Folder Does not exist. AFS Parent folder does exist and Shortcut does not already exist
+    Try {
+        #write-host "FolderPathChecks"
+        CheckFolderPaths -RoboDestination $ArchiveDestination -ParentFolder $ArchiveDesitnationParentFolder -ShortcutDestination $SharepointShortcut -SharepointSourceLocation $sharepointSource
+    
+        if (($script:AFSARCHIVECHECK) -eq "Pass" -and ($script:ArchiveParentFolder) -eq "Pass" -and ($script:SharepointShortcutCheck) -eq "Pass" -and ($script:SharepointSourceCheck -eq "Pass")) {
+            Write-Log  -Value "Successfully Passed all Folder Checks" -logpath $LogFileName
+            $ConfirmFolderPathResult = "Pass"
+        }
+        else {
+            $ConfirmFolderPathResult = "Fail"
+        }
+    }
+
+    Catch {
+        write-host -f Red "Error checking Archive Folder Destination!" $_.Exception.Message
+        Break
+    }
+
+
+    #Gets the Sharepoint Folders to be archived and Exporting Permissions Report. If Pre Check Fail, does not execute step and will not move to next step of te script and fail all subsequant steps.
+    Try {
+        if ($ConfirmFolderPathResult -eq "Fail") {
+            $ConfirmPermissionsExport = "Fail"
+        }
+        else {
+   
+            write-host -f White "Getting Sharepoint Folder Permissions, This may take a few minutes"
+            $Folder = Get-PnPFolder -Url $FolderSiteRelativeURL
+            Write-Log  -Value "Successfully accessed Folder" -logpath $LogFileName
+
+            #Call the functions to generate folder permission report
+            $ExportPermissions = Get-PnPFolderPermission $Folder
+            Write-Log  -Value "Successfully exported Permissions" -logpath $LogFileName
+            $ConfirmPermissionsExport = Get-Item $PermissionsReport
+        }
+
+    }
+    Catch {
+        write-host -f Red "Error Generating Folder Permission Report!" $_.Exception.Message
+        Break
+    }
+
+    #Gets the Exporting Permissions Report. If Pre Check Fail, does not execute step and will not move to next step of te script and fail all subsequant steps.
+    Try {
+        if ($ConfirmPermissionsExport -eq "Fail") {
+            $confirmFolderSize = "Fail"
+        }
+        Else {
+            $FolderSizeGet = Get-PnPFolder -Url $FolderSiteRelativeURL -Includes ListItemAllFields -ErrorAction SilentlyContinue
+            #Get the total Size of the folder - with versions
+            $FolderSize = $([Math]::Round(($FolderSizeGet.ListItemAllFields.FieldValues.SMTotalSize.LookupId / 1MB), 2))
+            $confirmFolderSize = $FolderSize
+        }
+    }
+    Catch {
+        write-host -f Red "Error Generating Folder Permission Report!" $_.Exception.Message
+        Break
+    }
+
+    #Runs Robocopy to transfer data from Sharepoint to AFS. 
+    Try {
+        if ($confirmFolderSize -eq "Fail") {
+            $confirmRoboCopy = "Fail"
+ 
+        }
+        else {
+            Invoke-Robocopy -RoboSource $sharepointSource -RoboDestination $ArchiveDestination -RoboLog $RobocopyLog
+            $confirmRoboCopy = "Pass"
+        }
+    }
+    Catch {
+        write-host -f Red "Failure occured Performing Robocopy" $_.Exception.Message
+        Break
+    }
+    #Secondary check to count total files in source and destination
+    Try {
+        if ($confirmRoboCopy -eq "Pass") {
+            Check-Robocopy -RoboSource $sharepointSource -RoboDestination $ArchiveDestination
+            $ConfirmCheckRobocopy = "Pass"
+        }
+        else {
+            $ConfirmCheckRobocopy = "Fail"
+        }
+    }
+    Catch {
+        write-host -f Red "Failure occured checking Robocopy status" $_.Exception.Message
+        Break
+    }
+    #Breaks inheritanceRemoves the permissions no longer required
+    Try {
+        if ($ConfirmCheckRobocopy -eq "Pass") {
+            RemoveArchivePermissions -RoboDestination $ArchiveDestination
+            $confirmRemovePermissions = "Pass"
+        }
+        Else {
+            $confirmRemovePermissions = "Fail"
+        }
+    }
+    Catch {
+        write-host -f Red "Error Removing Archive Folder permissions that are not required" $_.Exception.Message
+        Break
+    }
+    ##Adds the required permissions to AFS Archive Folder
+    Try {
+        if ($confirmRemovePermissions -eq "Pass") {
+            $migratepermissions = import-csv $PermissionsReport
+            AddArchivePermissions -RoboDestination $ArchiveDestination -PermissionsParameter $migratepermissions
+            $confirmAddArchivePermissions = "Pass"
+        }
+        Else {
+            $confirmAddArchivePermissions = "Fail"
+        }
+    }
+    Catch {
+        write-host -f Red "Error Add Archive Folder Permissions as ReadOnly!" $_.Exception.Message
+        Break
+    }
+    Try {
+        if ($confirmAddArchivePermissions -eq "Pass") {
+            $migratepermissions = import-csv $PermissionsReport
+            CheckArchivePermissions -RoboDestination $ArchiveDestination -PermissionsParameter $migratepermissions
+            $confirmCheckArchivePermissions = "Pass"
+        }
+        Else {
+            $confirmCheckArchivePermissions = "Fail"
+        }
+    }
+    Catch {
+        write-host -f Red "Error Add Archive Folder Permissions as ReadOnly!" $_.Exception.Message
+        Break
+    }
+
+    ##Creates the shortcut in Sharepoint
+    Try {
+        if ($confirmCheckArchivePermissions -eq "Pass") {
+            CreateShortcut -RoboDestination $ArchiveDestination -ShortcutTarget $SharepointShortcut
+            $confirmCreateShortcut = "Pass"
+        }
+        else {
+            $confirmCreateShortcut = "Fail"
+        }
+    }
+    Catch {
+        write-host -f Red "Error creating shortcut!" $_.Exception.Message
+        Break
+    }
+
+    Try {
+        if ($confirmCreateShortcut -eq "Pass") {
+            Write-Log  -Value "Begining deletion of I: Drive Files" -logpath $LogFileName
+            start-sleep -Seconds 5
+            $check = get-item $sharepointSource -ErrorAction SilentlyContinue
+            $zcheck = get-item $ArchiveDestination -ErrorAction SilentlyContinue
+            if (!($Check) -and ($zcheck)) {
+                Write-Log  -Value "Folder has been deleted from Sharepoint and Z: Drive data location has been confirmed" -logpath $LogFileName
+                Write-Log  -Value "$($sharepointSource) Project Folder successfully Archived" -logpath $LogFileName
+                write-host -f Green "$($sharepointSource) Project Folder successfully Archived"
+                $confirmDeletions = "Pass"
+                if (($ConfirmFolderPathResult -eq "Pass") -and ($ConfirmPermissionsExport -eq "Pass") -and ($confirmRoboCopy -eq "Pass") -and ($ConfirmCheckRobocopy -eq "Pass") -and ($confirmRemovePermissions -eq "Pass") -and ($confirmAddArchivePermissions -eq "Pass") -and ($confirmCheckArchivePermission -eq "Pass") -and ($confirmCreateShortcut -eq "Pass") -and ($confirmDeletions -eq "Pass")) {
+                    $confirmEntireScriptSuccessful = "Pass"
+                    write-host -f Green "Successfully Archived $($AFolder.Client)\$($AFolder.Project)"
+                }
+                Else {
+                    $confirmEntireScriptSuccessful = "Fail"
+                    write-host -f Yellow "Unsuccessful: $($AFolder.Client)\$($AFolder.Project) was not fully archived or was skipped"
+                }
+            }
+            else {
+                $confirmDeletions = "Fail"
+                $confirmEntireScriptSuccessful = "Fail"
+                write-host -f Yellow "Unsuccessful: $($AFolder.Client)\$($AFolder.Project) was not fully archived or was skipped"
+            }
+        }
+        else {
+            $confirmDeletions = "Fail"
+            $confirmEntireScriptSuccessful = "Fail"
+            write-host -f Yellow "Unsuccessful: $($AFolder.Client)\$($AFolder.Project) was not fully archived or was skipped"
+        }
+    }
+    Catch {
+        write-host -f Red "Error Deleting Source Folder after migration" $_.Exception.Message
+        Break
+    }
+
+    $FilteredItems | ForEach-Object {
+        $Resultset += New-Object PSObject -Property ([Ordered] @{
+                Client                   = $AFolder.Client
+                Project                  = $AFolder.Project
+                SizeMB                   = $confirmFolderSize
+                ScriptSuccessful         = $confirmEntireScriptSuccessful
+                ArchiveFolderCheck       = $script:AFSARCHIVECHECK
+                ArchiveParentFolderCheck = $script:ArchiveParentFolder
+                SharepointShortcut       = $script:SharepointShortcutCheck
+                SharepointSource         = $script:SharepointSourceCheck
+                FolderPathResult         = $ConfirmFolderPathResult
+                RoboCopy                 = $confirmRoboCopy
+                SourceFileCount          = $script:CheckSource
+                ArchiveFileCount         = $script:Checkdestination
+                checkRoboCopy            = $ConfirmCheckRobocopy
+                RemovePermissions        = $confirmRemovePermissions
+                AddArchivePermissions    = $confirmAddArchivePermissions
+                CheckArchivePermissons   = $confirmCheckArchivePermissions
+                CreateShortcut           = $confirmCreateShortcut
+                SourceDelete             = $confirmDeletions
+                PermissionsExport        = $ConfirmPermissionsExport
+                RoboCopyLog              = $RobocopyLog
+                LogFile                  = $LogFileName
+            })
+    }
+
+
+
+
+
+}
+
+
+$ResultSet | Export-Csv -Path $ReportSummaryFile -NoTypeInformation
+
+
