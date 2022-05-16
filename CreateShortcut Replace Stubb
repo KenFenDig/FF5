@@ -1,0 +1,158 @@
+Function Write-Log {
+
+    Param (
+    [parameter(Mandatory = $True)]
+    [String]$Value
+    )
+
+    $time = Get-Date -Format F
+    $Log = $Value+" ---> "+$time
+
+    Add-Content -Path C:\temp\SymbolicLink\StubsFix_Output.log -Value $log  -Force
+ }
+
+#Write-Log -Value "Getting All Symbolic Links"
+#$directories = get-childitem -path "\\10.115.10.13\g$\CorpData\Clients\z_test\" -Recurse -ErrorAction SilentlyContinue| Where {$_.linktype -eq "SymbolicLink"} | select Name,@{Name=’OnPremiseDirectory’;Expression={[string]::join(“;”, ($_.Fullname))}},@{Name=’SharepointDirectory’;Expression={[string]($_.Fullname.replace("\\10.115.10.13\g$\CorpData\","I:\"))}}, @{Name=’OnPremiseArchiveTarget’;Expression={[string]::join(“;”, ($_.Target))}}, @{Name=’AFSArchiveTarget’;Expression={[string]($_.Target.replace("R:\Archived-Data\G\CorpData\","T:\Archived-Data\"))}}# | export-csv C:\temp\SymbolicLinksNEW.csv -NoTypeInformation
+#$directories
+$aRRAY = @()
+
+#Changed Target "R:\Archived-Data\G\CorpData\" segment to "T:\Archived-Data\"  AFS Directory
+# Changed Directory "\\10.115.10.13\g$\CorpData\" segment to "I:\
+#Saved File
+
+Write-Log -Value "Getting Symbolic Links Dynamically. Change me for Production from CSV"
+    $Symboliclinks = import-csv 'C:\temp\take3.csv'
+    #$Symboliclinks = get-childitem -path "\\10.115.10.13\g$\CorpData\Clients\z_test\" -Recurse -ErrorAction SilentlyContinue| Where {$_.linktype -eq "SymbolicLink"} | select Name,@{Name=’OnPremiseDirectory’;Expression={[string]::join(“;”, ($_.Fullname))}},@{Name=’SharepointDirectory’;Expression={[string]($_.Fullname.replace("\\10.115.10.13\g$\CorpData\","I:\"))}}, @{Name=’OnPremiseArchiveTarget’;Expression={[string]::join(“;”, ($_.Target))}}, @{Name=’AFSArchiveTarget’;Expression={[string]($_.Target.replace("UNC\fiftyfive5.local\data\Archives\G\Corpdata\","\\ff5saafsprdae.file.core.windows.net\archivedata\Archived-Data\"))}} #| export-csv C:\temp\SymbolicLinksNEW.csv -NoTypeInformation
+    #$Symboliclinks = get-childitem -path "\\10.115.10.13\g$\CorpData\Clients\2degrees mobile\160126 Project Challenger" -Recurse -ErrorAction SilentlyContinue| Where {$_.linktype -eq "SymbolicLink"} | select Name,@{Name=’OnPremiseDirectory’;Expression={[string]::join(“;”, ($_.Fullname))}},@{Name=’SharepointDirectory’;Expression={[string]($_.Fullname.replace("\\10.115.10.13\g$\CorpData\","I:\"))}}, @{Name=’OnPremiseArchiveTarget’;Expression={[string]::join(“;”, ($_.Target))}}, @{Name=’AFSArchiveTarget’;Expression={[string]($_.Target.replace("UNC\fiftyfive5.local\data\Archives\G\Corpdata\","\\ff5saafsprdae.file.core.windows.net\archivedata\Archived-Data\"))}} #| export-csv C:\temp\SymbolicLinksNEW.csv -NoTypeInformation
+   # $Symboliclinks
+
+    foreach ($link in $Symboliclinks){
+    Write-Log -Value "Getting variables for $link.name"
+    
+    #Make sure that the Link still exists On Premises
+    $OnPremLink_check = get-item $link.OnPremSymbolicLinkPath -ErrorAction SilentlyContinue
+
+    #Get variable to make sure it doesnt exists in sharepoint
+    $Sharepoint_check = get-item $link.SharepointPath -ErrorAction SilentlyContinue
+
+    $SharepointShortcut = $link.SharepointShortcutPath
+    $SharepointShortcut_check = get-item $SharepointShortcut -ErrorAction SilentlyContinue
+
+    #Create variable of Sharepoint parent Folder Path
+    $sharepointParentFolder_Variable = $link.SharepointParentFolder_Path
+
+    #Check Sharepoint parent Folder Path
+    $SharepointParentFolder_check = get-item $sharepointParentFolder_Variable -ErrorAction SilentlyContinue
+
+    #Check that Archived Folder is present in AFS, AKA Successfuly Rehydration
+    $AFSArchiveTarget_check = get-item $link.AFSArchiveTarget_Path -ErrorAction SilentlyContinue
+
+    if ($OnPremLink_check -ne $null){
+        $OnPremLink_check = "Pass"
+        Write-Log -Value "PreVerification Pass: On-Premise Symbolic Link Exists"
+    }
+    else{
+        $OnPremLink_check = "Fail"
+        Write-Log -Value "PreVerification Fail: On-Premise Symbolic Does Not Exist"
+    }
+    if ($Sharepoint_check -eq $null){
+        $Sharepoint_check = "Pass"
+        Write-Log -Value "PreVerification Pass: Destination Sharepoint Folder does not exist"
+    }
+    else{
+        $Sharepoint_check = "Fail"
+        Write-Log -Value "PreVerification Fail: Destination Sharepoint Folder does  exist"
+    }
+    if ($SharepointShortcut_check -eq $null){
+        $SharepointShortcut_check = "Pass"
+        Write-Log -Value "PreVerification Pass: Destination Sharepoint shortcut does not exist"
+    }
+    else{
+        $SharepointShortcut_check = "Fail"
+        Write-Log -Value "PreVerification Fail: Destination Sharepoint Shortcut does  exist"
+    }
+    if ($SharepointParentFolder_check -ne $null){
+        $SharepointParentFolder_check = "Pass"
+        Write-Log -Value "PreVerification Pass: Destination Sharepoint Parent Folder exists"
+    }
+    else{
+        $SharepointParentFolder_check = "Fail"
+        Write-Log -Value "PreVerification Fail: Destination Sharepoint Parent Folder does not exist"
+    }
+    if ($AFSArchiveTarget_check -ne $null){
+        $AFSArchiveTarget_check = "Pass"
+        Write-Log -Value "PreVerification Pass: Destination AFS Archive Target Folder exists"
+    }
+    else{
+        $AFSArchiveTarget_check = "Fail"
+        Write-Log -Value "PreVerification Fail: Destination AFS Archive Target Folderr does not exist"
+    }
+    
+    if ($OnPremLink_check -eq "Pass" -and $Sharepoint_check -eq "Pass" -and $SharepointShortcut_check -eq "Pass" -and $SharepointParentFolder_check -eq "Pass" -and $AFSArchiveTarget_check -eq "Pass"){
+        Write-Log -Value "Creating Shortcut in sharepoint"
+        #Setting variable for Shortcut
+        $WScriptShell = New-Object -ComObject WScript.Shell
+        $Shortcut = $WScriptShell.CreateShortcut($SharepointShortcut)
+        $Shortcut.TargetPath = $link.AFSArchiveTarget_path
+        $shortcut.IconLocation = "C:\Windows\system32\SHELL32.dll,45"
+        $Shortcut.Save()
+
+
+        $verifyShortcut = get-item  $SharepointShortcut -ErrorAction SilentlyContinue
+        If ($verifyShortcut -ne $null){
+            #Get all shortcut Information
+
+            Write-Log "Success: Shortcut created successfully"
+            write-host -f Green $link.OnPremSymbolicLinkPath '; Success'
+            $confirm = "Success"
+            $array += New-Object -TypeName PSObject -Property @{
+
+            
+            SharepointShortcut = $SharepointShortcut
+            Success            =  $confirm
+            OnPremLink_check = $OnPremLink_check
+            Sharepoint_check = $Sharepoint_check
+            SharepointShortcut_check = $SharepointShortcut_check
+            SharepointParentFolder_check = $SharepointParentFolder_check
+            AFSArchiveTarget_check = $AFSArchiveTarget_check
+}
+        }
+        else
+        {
+            Write-log "FAILED: Pre verification checks passed but shortcut was not created in sharepoint - investigate"
+            write-host -f Red $link.OnPremSymbolicLinkPath '; Shortcut creation failure'
+             $confirm = "Fail"
+            $array += New-Object -TypeName PSObject -Property @{
+
+            
+            SharepointShortcut = $SharepointShortcut
+            Success            =  $confirm
+            OnPremLink_check = $OnPremLink_check
+            Sharepoint_check = $Sharepoint_check
+            SharepointShortcut_check = $SharepointShortcut_check
+            SharepointParentFolder_check = $SharepointParentFolder_check
+            AFSArchiveTarget_check = $AFSArchiveTarget_check
+            }
+        }
+    }
+    else
+    {
+        Write-Log -Value "FAILED: Shortcut not created in sharepoint due to preverficication Failue"
+        write-host -f Red $link.OnPremSymbolicLinkPath '; preverficication Failue'
+         $confirm = "Fail"
+            $array += New-Object -TypeName PSObject -Property @{
+
+            
+            SharepointShortcut = $SharepointShortcut
+            OriginalLocation = $link.OnPremSymbolicLinkPath
+            Success            =  $confirm
+            OnPremLink_check = $OnPremLink_check
+            Sharepoint_check = $Sharepoint_check
+            SharepointShortcut_check = $SharepointShortcut_check
+            SharepointParentFolder_check = $SharepointParentFolder_check
+            AFSArchiveTarget_check = $AFSArchiveTarget_check
+            }
+    }
+}
+$array | export-csv C:\temp\SymbolicLink\SymbolicLinkscreation_take2.csv -notypeInformation
+#>
