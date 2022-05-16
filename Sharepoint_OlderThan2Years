@@ -1,0 +1,54 @@
+#Connect to SHarepoint Online FiftyFive5 Production Sharepoint Site - Internal
+Connect-PnPOnline -Url "https://fiftyfivefive.sharepoint.com/sites/Internal/" -UseWebLogin
+$ClientContext = Get-PnPContext
+$intdata = Get-PnPList | Where { $_.Title -eq "intdata" }
+
+
+# WARNING: The following command will run for a long time - This is expected!!
+# Get all items from the Clients folder in the document library in batches of 500 items
+
+#Produces report only for Files and Folders under Clients Folder. Filter can be changed for other directories if required.
+$ListItems = Get-PnPListItem -List $intdata -PageSize 500 | Where-Object { $_.FieldValues.FileRef -notlike "*Templates*" -and $_.FieldValues.FileRef -like "/sites/Internal/intdata/Clients*" }
+$savedlistitems = $listitems
+#Filter List Items accordingly
+$TimeStamp = (Get-Date).AddDays(-730)
+
+# 730 above is for files that are at least 2 years old, modify the number for a specific number of days
+# e.g.730 for 2 years, 30 for a month, 180 for 6 months and so on.
+
+$FilteredItems = $ListItems | Where { $_["Modified"] -Lt $TimeStamp -and $_.FileSystemObjectType -eq "File"}
+$Resultset = @()
+
+$folders = $ListItems | where {$_.FileSystemObjectType -eq "Folder"}
+$Resultset2 = @()
+
+#Collect filtered documents data and get each item's Modified Date
+$FilteredItems | ForEach-Object {
+	$Resultset += New-Object PSObject -Property ([Ordered] @{
+			Name = $_.FieldValues.FileLeafRef
+			RelativeURL = $_.FieldValues.FileRef
+            Folder =  $_.FieldValues.FileDirRef
+			CreatedBy = $_.FieldValues.Author.Email
+			CreatedOn = $_.FieldValues.Created
+			ModifiedBy = $_.FieldValues.Editor.Email
+			ModifiedOn = $_.FieldValues.Modified
+			FileSizeInKB = $_.FieldValues.File_x0020_Size
+            ObjectType = $_.FileSystemObjectType
+	})
+}
+
+$Folders | ForEach-Object {
+	$Resultset2 += New-Object PSObject -Property ([Ordered] @{
+			Folder = $_.FieldValues.FileRef
+            Name = $_.FieldValues.FileLeafRef
+			ModifiedOn = $_.FieldValues.Modified
+      ItemCount = $_.FieldValues.ItemChildCount
+      FolderCount = $_.FieldValues.FolderChildCount
+	})
+}
+
+
+# Export data to CSV File to the working script folder location
+$ResultSet | Export-Csv -Path $PWD\FF5LastModified2years.csv -NoTypeInformation
+$ResultSet2 | Export-Csv -Path $PWD\FF5FolderCounts.csv -NoTypeInformation
+
