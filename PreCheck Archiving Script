@@ -1,0 +1,124 @@
+
+Function CheckFolderPaths {
+    Param (
+        [parameter(Mandatory = $True)]
+        [String]$RoboDestination,
+        [parameter(Mandatory = $True)]
+        [String]$ParentFolder,
+        [parameter(Mandatory = $True)]
+        [String]$ShortcutDestination
+    )
+
+    Try {
+
+
+        if (Test-Path -Path $RoboDestination) {
+           # write-host -f Red "Folder already Exist, Check Failed so stopping Script"
+            $script:AFSARCHIVECHECK = "Fail - Folder Already Exists"
+           
+        }
+        Else {
+            # write-host -f Green "Folder Does not already Exists, check Pass"
+            $script:AFSARCHIVECHECK = "Pass"
+        }
+        if (Test-Path -Path $ParentFolder) {
+            # write-host -f Green "Parent folder does Exists, check Pass"
+            $script:ArchiveParentFolder = "Pass"
+        }
+        Else {
+           # write-host -f Red "Parent Folder does not already Exist, Check Failed so stopping Script"
+            $script:ArchiveParentFolder = "Fail - Parent Folder does not exist"
+            
+        }
+        if (Test-Path -Path $ShortcutDestination) {
+            #write-host -f Red "ArchiveShortcut already Exist, Check Failed so stopping Script"
+            $script:SharepointShortcutCheck = "Fail - Archive Shortcut already exists in sharepoint"
+            
+        }
+        Else {
+            # write-host -f Green "Shortcut does not already Exists, check Pass"
+            $script:SharepointShortcutCheck = "Pass"
+        }
+    }
+    Catch {
+        Write-Warning $_
+    }
+}
+
+
+Function Get-FileName($InitialDirectory)
+{
+    [System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms") | Out-Null
+
+  $OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+  $OpenFileDialog.initialDirectory = $initialDirectory
+  $OpenFileDialog.filter = "CSV (*.csv) | *.csv"
+  $OpenFileDialog.ShowDialog() | Out-Null
+  $OpenFileDialog.FileName
+}
+
+
+$Resultset = @()
+$filePath = Get-FileName
+$ArchiveFolders =  import-csv $filePath
+
+#Sharepoint Site Connections Strings
+$SiteURL = "https://fiftyfivefive.sharepoint.com/sites/Internal"
+
+Try {
+    #write-host -f White "Checking Powershell Modules are installed and drives are mapped"
+    if (!(Get-Module  | where { $_.Name -eq "PNP.Powershell" })) {
+        Connect-PnPOnline -URL $SiteURL -useweblogin
+    }
+}
+Catch {
+    write-host -f Red "Error connecting to PNP Powershell Module. Ensure that you have relevant Access, IE Global Admin\SharepointAdmin" $_.Exception.Message
+    Break
+}
+
+foreach ($AFolder in $ArchiveFolders){
+
+Try {
+Write-host "Checking $($AFolder.Client)\$($AFolder.Project)" 
+$FolderSiteRelativeURL = "/sites/Internal/intdata/Clients/" + $AFolder.Client + "/" + $AFolder.Project
+$sharepointShortcut = "I:\Clients\" + $AFolder.Client + "\" + $AFolder.Project + ".lnk"
+$ArchiveDestination = "\\ff5saafsprdae.file.core.windows.net\archivedata\archived-data\Clients\" + $AFolder.Client + "\" + $AFolder.Project
+$ArchiveDesitnationParentFolder = Split-path $ArchiveDestination
+
+
+#$SharepointParentFolder = "/intdata/Clients/" + $Client
+
+#Get the folder
+$Folder = Get-PnPFolder -Url $FolderSiteRelativeURL -Includes ListItemAllFields -ErrorAction SilentlyContinue
+ 
+#Get the total Size of the folder - with versions
+$FolderSize = $([Math]::Round(($Folder.ListItemAllFields.FieldValues.SMTotalSize.LookupId/1MB),2))
+}
+Catch {
+write-host -f Red "Error checking Folder Size!" $_.Exception.Message
+    
+}
+Try {
+    #write-host "FolderPathChecks"
+    CheckFolderPaths -RoboDestination $ArchiveDestination -ParentFolder $ArchiveDesitnationParentFolder -ShortcutDestination $SharepointShortcut
+}
+Catch {
+    write-host -f Red "Error checking Archive Folder Destination!" $_.Exception.Message
+    
+}
+
+$FilteredItems | ForEach-Object {
+    $Resultset += New-Object PSObject -Property ([Ordered] @{
+            Client = $AFolder.Client
+            Project = $AFolder.Project
+            SizeMB =  $FolderSize
+            ArchiveFolderCheck =  $script:AFSARCHIVECHECK
+            ArchiveParentFolderCheck = $script:ArchiveParentFolder
+            SharepointShortcut = $script:SharepointShortcutCheck
+
+    })
+}
+
+
+}
+$ResultSet | Export-Csv -Path $PWD\ArchivingPreCheck.csv -NoTypeInformation
